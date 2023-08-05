@@ -35,7 +35,11 @@ import org.bukkit.material.*;
 
 import javax.annotation.Nonnull;
 import javax.annotation.Nullable;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Method;
 import java.util.*;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * <b>XBlock</b> - MaterialData/BlockData Support<br>
@@ -74,6 +78,9 @@ public final class XBlock {
     private static final boolean ISFLAT = XMaterial.supports(13);
     private static final Map<XMaterial, XMaterial> ITEM_TO_BLOCK = new EnumMap<>(XMaterial.class);
     private static final Map<PreFlatteningMaterial,String> LEGACY_TO_BLOCKDATA = new HashMap<>();
+    private static final Map<String,PreFlatteningMaterial> BLOCKDATA_TO_LEGACY = new HashMap<>();
+    @Nullable
+    private static Method setBlockTypePreFlatteningMethod;
 
     static {
         ITEM_TO_BLOCK.put(XMaterial.MELON_SLICE, XMaterial.MELON_STEM);
@@ -89,6 +96,12 @@ public final class XBlock {
 
         ITEM_TO_BLOCK.put(XMaterial.PUMPKIN_SEEDS, XMaterial.PUMPKIN_STEM);
         ITEM_TO_BLOCK.put(XMaterial.PUMPKIN_PIE, XMaterial.PUMPKIN);
+
+        if (!ISFLAT) {
+            try {
+                setBlockTypePreFlatteningMethod = Block.class.getMethod("setTypeIdAndData", int.class, byte.class, boolean.class);
+            } catch (NoSuchMethodException ignore) { }
+        }
 
         LEGACY_TO_BLOCKDATA.put(new PreFlatteningMaterial(2,(byte)0),"minecraft:grass_block[snowy=false]");
         LEGACY_TO_BLOCKDATA.put(new PreFlatteningMaterial(3,(byte)2),"minecraft:podzol[snowy=false]");
@@ -1539,6 +1552,8 @@ public final class XBlock {
         LEGACY_TO_BLOCKDATA.put(new PreFlatteningMaterial(255,(byte)1),"minecraft:structure_block[mode=load]");
         LEGACY_TO_BLOCKDATA.put(new PreFlatteningMaterial(255,(byte)2),"minecraft:structure_block[mode=corner]");
         LEGACY_TO_BLOCKDATA.put(new PreFlatteningMaterial(255,(byte)3),"minecraft:structure_block[mode=data]");
+
+        for (Map.Entry<PreFlatteningMaterial,String> e : LEGACY_TO_BLOCKDATA.entrySet()) BLOCKDATA_TO_LEGACY.put(e.getValue(), e.getKey());
     }
 
     private XBlock() {
@@ -1824,16 +1839,34 @@ public final class XBlock {
         return setType(block, material, true);
     }
 
-    public static boolean setType(@Nonnull Block block, String blockData) {
+    public static boolean setType(@Nonnull Block block, String blockData) throws IllegalArgumentException {
+        String originalBlockData = XBlock.getBlockData(block);
+
         if (ISFLAT) {
-            String originalBlockData = block.getBlockData().toString();
             block.setBlockData(Bukkit.createBlockData(blockData));
-            boolean update = !originalBlockData.equals(block.getBlockData().toString());
-            return update;
+        }
+        else {
+            PreFlatteningMaterial set = BLOCKDATA_TO_LEGACY.get(blockData);
+            if (set != null) {
+                try {
+                    setBlockTypePreFlatteningMethod.invoke(block, set.getId(), set.getSubId(), true); // TODO gravity
+                } catch (IllegalArgumentException | InvocationTargetException | IllegalAccessException | NullPointerException ignored) {}
+            }
+            else {
+                // not cached; get default XMaterial
+                Pattern r = Pattern.compile("^minecraft:([^\\]]+)");
+                Matcher m = r.matcher(blockData);
+                if (!m.find()) throw new IllegalArgumentException("Invalid blockData: " + blockData);
+
+                Optional<XMaterial> mat = XMaterial.matchXMaterial(m.group(1));
+                if (!mat.isPresent()) throw new IllegalArgumentException("Material '" + m.group(1) + "' not found");
+
+                XBlock.setType(block, mat.get());
+            }
         }
 
-        // TODO inverse
-        return true;
+        boolean updated = !originalBlockData.equals(XBlock.getBlockData(block));
+        return updated; // `setType` returns if the block was updated
     }
 
     public static String getBlockData(@Nonnull Block block) {
